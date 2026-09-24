@@ -4,9 +4,11 @@ import { ElMessage } from 'element-plus'
 import { CircleCheck, Clock, DocumentChecked, Plus, Search, TrendCharts } from '@element-plus/icons-vue'
 import { planApi } from '@/api/plans'
 import { pondApi } from '@/api/ponds'
+import { recommendationApi } from '@/api/recommendations'
 import MetricCard from '@/components/common/MetricCard.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import PlanDrawer from '@/components/common/PlanDrawer.vue'
+import RecommendationSnapshot from '@/components/common/RecommendationSnapshot.vue'
 import { useAuth } from '@/hooks/useAuth'
 import { useQueryParams } from '@/hooks/useQueryParams'
 import type { FeedingPlan, FeedingPlanInput, FeedingRecommendation, Pond } from '@/types/models'
@@ -24,14 +26,19 @@ const editorOpen = ref(false)
 const drawerOpen = ref(false)
 const transitionOpen = ref(false)
 const recommendationOpen = ref(false)
+const snapshotDrawerOpen = ref(false)
 const editingId = ref<number | null>(null)
 const selected = ref<FeedingPlan | null>(null)
+const selectedSnapshot = ref<FeedingRecommendation | null>(null)
 const transitionAction = ref<'submit' | 'approve' | 'revoke'>('submit')
 const transitionReason = ref('')
 const startLocal = ref(toLocalInput())
 const endLocal = ref(toLocalInput(new Date(Date.now() + 30 * 86400000)))
 const weather = ref('晴朗，微风')
 const recommendation = ref<FeedingRecommendation | null>(null)
+const recommendations = ref<FeedingRecommendation[]>([])
+const recLoading = ref(false)
+const showInvalidRecs = ref(false)
 const emptyForm = (): FeedingPlanInput => ({ pondId: 0, name: '', dailyAmountKg: 0, frequencyPerDay: 3, feedType: '', targetGrowthStage: '', minOxygen: 5, startDate: '', endDate: '', rationale: '' })
 const form = reactive<FeedingPlanInput>(emptyForm())
 
@@ -39,6 +46,25 @@ const pendingCount = computed(() => plans.value.filter((item) => item.status ===
 const approvedCount = computed(() => plans.value.filter((item) => item.status === 'approved').length)
 const dailyTotal = computed(() => plans.value.filter((item) => item.status === 'approved').reduce((sum, item) => sum + item.dailyAmountKg, 0))
 const transitionTitle = computed(() => ({ submit: '提交审核', approve: '批准计划', revoke: '撤销计划' }[transitionAction.value]))
+const selectedPondId = computed(() => Number(params.pondId) || 0)
+const visibleRecommendations = computed(() => showInvalidRecs.value ? recommendations.value : recommendations.value.filter((item) => item.valid))
+const validRecCount = computed(() => recommendations.value.filter((item) => item.valid).length)
+
+async function loadRecommendations() {
+  if (!selectedPondId.value) {
+    recommendations.value = []
+    return
+  }
+  recLoading.value = true
+  try {
+    const result = await recommendationApi.list({ pondId: selectedPondId.value, page: 1, pageSize: 100, validOnly: false })
+    recommendations.value = result.items
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    recLoading.value = false
+  }
+}
 
 async function load() {
   loading.value = true
@@ -50,6 +76,7 @@ async function load() {
     plans.value = result.items
     total.value = result.total
     ponds.value = pondResult.items
+    await loadRecommendations()
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -138,12 +165,41 @@ async function generateRecommendation(plan: FeedingPlan) {
   recommendationOpen.value = true
   saving.value = true
   try {
-    recommendation.value = await planApi.recommendation(plan.pondId, weather.value)
+    // 生成即落库为带编号快照；旧建议会在同池新快照生成后标记失效。
+    recommendation.value = await recommendationApi.generate(plan.pondId, weather.value)
+    await loadRecommendations()
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
     saving.value = false
   }
+}
+
+async function regenerate() {
+  if (!selected.value) return
+  saving.value = true
+  try {
+    recommendation.value = await recommendationApi.generate(selected.value.pondId, weather.value)
+    ElMessage.success(`已生成并保存建议快照 ${recommendation.value.snapshotNo}`)
+    await loadRecommendations()
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    saving.value = false
+  }
+}
+
+function openSnapshot(snapshot: FeedingRecommendation) {
+  selectedSnapshot.value = snapshot
+  snapshotDrawerOpen.value = true
+}
+
+function actionLabel(action: string) {
+  return action === 'hold' ? '暂停投喂' : action === 'reduce' ? '减量投喂' : '按计划投喂'
+}
+
+function actionTagType(action: string) {
+  return action === 'hold' ? 'danger' : action === 'reduce' ? 'warning' : 'success'
 }
 
 let timer: number | undefined
@@ -185,6 +241,27 @@ onMounted(load)
       </el-table>
       <div class="pagination"><el-pagination v-model:current-page="params.page" layout="total, prev, pager, next" :total="total" :page-size="20" /></div>
     </section>
+    <section class="workspace-panel">
+      <div class="panel-toolbar">
+        <div class="filters">
+          <el-select v-model="params.pondId" placeholder="选择养殖池查看建议" style="width: 240px"><el-option v-for="pond in ponds" :key="pond.id" :label="pond.name" :value="String(pond.id)" /></el-select>
+          <el-switch v-model="showInvalidRecs" inline-prompt active-text="含已失效" inactive-text="仅有效" />
+        </div>
+        <el-tag v-if="selectedPondId" type="success" effect="plain" round>有效建议 {{ validRecCount }} 条</el-tag>
+      </div>
+      <el-alert v-if="!selectedPondId" title="请先选择养殖池，按池查看有效投喂建议及其失效原因" type="info" :closable="false" show-icon />
+      <el-alert v-else-if="validRecCount === 0 && !showInvalidRecs" title="该养殖池当前没有有效建议，请基于最新水质重新生成" type="warning" :closable="false" show-icon />
+      <el-table v-else v-loading="recLoading" :data="visibleRecommendations" stripe empty-text="暂无投喂建议快照" row-key="id">
+        <el-table-column label="建议编号" min-width="150"><template #default="{ row }"><button class="table-link" @click="openSnapshot(row)"><strong>{{ row.snapshotNo }}</strong></button></template></el-table-column>
+        <el-table-column label="状态" width="100"><template #default="{ row }"><el-tag v-if="row.valid" type="success" size="small" effect="dark" round>有效</el-tag><el-tooltip v-else :content="row.invalidReason" placement="top"><el-tag type="danger" size="small" effect="dark" round>已失效</el-tag></el-tooltip></template></el-table-column>
+        <el-table-column label="结论" min-width="150"><template #default="{ row }"><div class="primary-cell"><el-tag :type="actionTagType(row.action)" size="small">{{ actionLabel(row.action) }}</el-tag><small>{{ formatNumber(row.dailyAmountKg, 2) }} kg/日 · {{ formatNumber(row.amountPerFeedingKg, 2) }} kg/次</small></div></template></el-table-column>
+        <el-table-column label="计划 / 版本" min-width="120"><template #default="{ row }">v{{ row.planVersion }} · {{ formatNumber(row.adjustmentPercent, 0) }}%</template></el-table-column>
+        <el-table-column label="水质依据" min-width="170"><template #default="{ row }"><div class="primary-cell"><small>{{ formatDateTime(row.readingMeasuredAt) }}</small><small>溶氧 {{ formatNumber(row.dissolvedOxygen, 1) }} · {{ row.riskLevel === 'normal' ? '正常' : row.riskLevel === 'warning' ? '预警' : '严重' }}</small></div></template></el-table-column>
+        <el-table-column label="天气窗口" prop="weatherWindow" min-width="120" show-overflow-tooltip />
+        <el-table-column label="生成时间" min-width="160"><template #default="{ row }">{{ formatDateTime(row.createdAt) }}</template></el-table-column>
+        <el-table-column label="失效原因" min-width="200"><template #default="{ row }"><span v-if="!row.valid" class="invalid-reason">{{ row.invalidReason }}</span><span v-else class="valid-dash">—</span></template></el-table-column>
+      </el-table>
+    </section>
     <el-dialog v-model="editorOpen" :title="editingId ? '编辑计划新版本' : '新建投喂计划'" width="720px">
       <el-form label-position="top" class="form-grid">
         <el-form-item label="养殖池"><el-select v-model="form.pondId"><el-option v-for="pond in ponds.filter((item) => item.status !== 'closed')" :key="pond.id" :label="`${pond.name} · ${pond.growthStage}`" :value="pond.id" /></el-select></el-form-item>
@@ -206,14 +283,19 @@ onMounted(load)
       <el-form-item class="dialog-field" label="变更原因"><el-input v-model="transitionReason" type="textarea" :rows="4" /></el-form-item>
       <template #footer><el-button @click="transitionOpen = false">取消</el-button><el-button type="primary" :loading="saving" @click="transition">确认{{ transitionTitle }}</el-button></template>
     </el-dialog>
-    <el-dialog v-model="recommendationOpen" title="实时投喂建议" width="560px">
-      <el-form-item label="天气窗口"><div class="inline-action"><el-input v-model="weather" placeholder="例：晴朗、小雨、暴雨" /><el-button :loading="saving" @click="selected && generateRecommendation(selected)">重新计算</el-button></div></el-form-item>
-      <div v-if="recommendation" class="recommendation-result" :data-action="recommendation.action">
-        <div class="recommendation-main"><span>{{ recommendation.action === 'hold' ? '暂停投喂' : recommendation.action === 'reduce' ? '减量投喂' : '按计划投喂' }}</span><strong>{{ recommendation.dailyAmountKg }} kg/日</strong><small>{{ recommendation.amountPerFeedingKg }} kg × {{ recommendation.frequencyPerDay }} 次</small></div>
-        <ul><li v-for="reason in recommendation.reasons" :key="reason">{{ reason }}</li></ul>
+    <el-dialog v-model="recommendationOpen" title="生成投喂建议快照" width="600px">
+      <el-alert title="每次生成都会保存为带编号快照，记录计划版本、水质读数、天气窗口与调整比例；安排执行时需引用有效快照。" type="info" :closable="false" show-icon />
+      <el-form-item class="dialog-field" label="天气窗口"><div class="inline-action"><el-input v-model="weather" placeholder="例：晴朗、小雨、暴雨" /><el-button :loading="saving" @click="regenerate">生成并保存</el-button></div></el-form-item>
+      <div v-if="recommendation">
+        <RecommendationSnapshot :recommendation="recommendation" />
       </div>
-      <el-skeleton v-else :rows="4" animated />
+      <el-skeleton v-else-if="saving" :rows="4" animated />
+      <el-empty v-else description="填写天气窗口后生成建议" :image-size="70" />
+      <template #footer><el-button @click="recommendationOpen = false">关闭</el-button></template>
     </el-dialog>
     <PlanDrawer v-model="drawerOpen" :plan="selected" />
+    <el-drawer v-model="snapshotDrawerOpen" title="投喂建议快照详情" size="460px">
+      <RecommendationSnapshot v-if="selectedSnapshot" :recommendation="selectedSnapshot" />
+    </el-drawer>
   </div>
 </template>

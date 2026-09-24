@@ -13,21 +13,22 @@ import (
 )
 
 type ReadingService struct {
-	repo          *repository.ReadingRepository
-	ponds         *repository.PondRepository
-	audit         *AuditService
-	transactional bool
+	repo            *repository.ReadingRepository
+	ponds           *repository.PondRepository
+	recommendations *repository.RecommendationRepository
+	audit           *AuditService
+	transactional   bool
 }
 
 func (s *ReadingService) withinTransaction(fn func(*ReadingService) error) error {
 	return s.audit.WithinTransaction(func(tx *gorm.DB, audit *AuditService) error {
-		scoped := &ReadingService{repo: repository.NewReadingRepository(tx), ponds: repository.NewPondRepository(tx), audit: audit, transactional: true}
+		scoped := &ReadingService{repo: repository.NewReadingRepository(tx), ponds: repository.NewPondRepository(tx), recommendations: repository.NewRecommendationRepository(tx), audit: audit, transactional: true}
 		return fn(scoped)
 	})
 }
 
-func NewReadingService(repo *repository.ReadingRepository, ponds *repository.PondRepository, audit *AuditService) *ReadingService {
-	return &ReadingService{repo: repo, ponds: ponds, audit: audit}
+func NewReadingService(repo *repository.ReadingRepository, ponds *repository.PondRepository, recommendations *repository.RecommendationRepository, audit *AuditService) *ReadingService {
+	return &ReadingService{repo: repo, ponds: ponds, recommendations: recommendations, audit: audit}
 }
 
 func (s *ReadingService) List(query dto.PageQuery, pondID uint, unconfirmed bool) (dto.PageResult[model.WaterReading], error) {
@@ -89,6 +90,10 @@ func (s *ReadingService) Create(input dto.WaterReadingInput, actor Actor) (model
 		return model.WaterReading{}, WrapError(CodeInternal, "创建水质读数失败", err)
 	}
 	reading.Pond = &pond
+	// 出现新水质读数后，该池现存的投喂建议一律失效，不能再据其安排执行。
+	if _, err := s.recommendations.MarkPondInvalid(input.PondID, InvalidReasonNewReading, time.Now().UTC()); err != nil {
+		return model.WaterReading{}, WrapError(CodeInternal, "失效相关投喂建议失败", err)
+	}
 	if err := s.audit.Record(actor, "create", "water_reading", reading.ID, nil, reading, message); err != nil {
 		return model.WaterReading{}, err
 	}
@@ -143,6 +148,13 @@ func (s *ReadingService) Delete(id uint, actor Actor) error {
 	}
 	if reading.Confirmed {
 		return NewError(CodeConflict, "已确认的异常读数不能删除")
+	}
+	refCount, err := s.recommendations.CountReferencingReading(id)
+	if err != nil {
+		return WrapError(CodeInternal, "检查投喂建议引用失败", err)
+	}
+	if refCount > 0 {
+		return NewError(CodeConflict, "该读数已被投喂建议快照引用，不能删除")
 	}
 	if err := s.repo.Delete(&reading); err != nil {
 		return WrapError(CodeInternal, "删除水质读数失败", err)

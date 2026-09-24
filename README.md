@@ -7,8 +7,8 @@
 - 养殖池工作台：管理品种、容量、生长阶段和运行/隔离/关闭状态。
 - 水质风险：录入溶解氧、水温、pH、氨氮和浊度，自动判定正常/预警/严重并要求人工确认异常。
 - 投喂计划：草稿修订自动升版，支持提交、批准和撤销；批准时会校验水质与溶解氧阈值。
-- 投喂建议：结合已批准计划、24 小时内水质、天气和生长阶段，输出正常投喂、减量或暂停。
-- 执行反馈：仅允许已批准计划进入执行，记录实际量、现场溶解氧与反馈。
+- 投喂建议：结合已批准计划、24 小时内水质、天气和生长阶段，输出正常投喂、减量或暂停；**每次生成都保存为带编号快照**（`REC-000001`…），固化计划版本、水质读数、天气窗口与调整比例。出现新水质、计划撤销/重批、计划执行完成或养殖池退出运行状态时，旧快照自动标记失效原因，不能再用于安排执行。
+- 执行反馈：安排投喂时**必须从有效建议快照中选择一条**，执行记录写入建议编号与完整依据；记录实际量、现场溶解氧与反馈。
 - 安全与审计：JWT、RBAC、请求 ID、全局异常恢复、Redis 限流和实体变更前后快照。
 
 ## 快速启动
@@ -51,9 +51,10 @@ docker compose down
 1. 在“养殖池”创建或选择一个 `active` 养殖池。
 2. 在“水质读数”录入当前指标；如判定异常，先进行现场复核和确认。
 3. 在“投喂计划”创建草稿并提交，主管检查最新水质后批准。
-4. 已批准计划可输入天气窗口生成实时投喂建议。
-5. 在“执行反馈”安排、开始并提交实际结果。完成后计划进入 `executed`。
-6. 管理员或主管可在“操作审计”查看人员、原因、请求 ID 和变更快照。
+4. 在“投喂计划”选择已批准计划与天气窗口生成投喂建议，系统保存为带编号快照（计划版本、水质读数、天气窗口、调整比例）。
+5. 在“执行反馈”安排投喂时，从该养殖池的**有效建议**中选择一条，执行记录会写入建议编号与依据；随后开始并提交实际结果。完成后计划进入 `executed`，其建议同步失效。
+6. 出现新水质读数、计划撤销/修订、审批状态变化或养殖池退出运行后，旧建议在计划页显示“已失效”及原因，无法再安排执行。
+7. 管理员或主管可在“操作审计”查看人员、原因、请求 ID 和变更快照。
 
 ## 项目结构
 
@@ -91,6 +92,7 @@ docker compose down
 | `Pond` | `model/pond.go` | `dto/pond.go` | `repository/pond_repository.go` | `service/pond_service.go` | `handler/pond_handler.go` | `api/ponds.ts` | `pages/PondsPage.vue` |
 | `WaterReading` | `model/water_reading.go` | `dto/reading.go` | `repository/reading_repository.go` | `service/reading_service.go` | `handler/reading_handler.go` | `api/readings.ts` | `pages/ReadingsPage.vue` |
 | `FeedingPlan` | `model/feeding_plan.go` | `dto/plan.go` | `repository/plan_repository.go` | `service/plan_service.go` | `handler/plan_handler.go` | `api/plans.ts` | `pages/PlansPage.vue` |
+| `FeedingRecommendation` | `model/feeding_recommendation.go` | `dto/recommendation.go` | `repository/recommendation_repository.go` | `service/recommendation_service.go` | `handler/recommendation_handler.go` | `api/recommendations.ts` | `pages/PlansPage.vue`（共享 `components/common/RecommendationSnapshot.vue`） |
 | `ControlExecution` | `model/control_execution.go` | `dto/execution.go` | `repository/execution_repository.go` | `service/execution_service.go` | `handler/execution_handler.go` | `api/executions.ts` | `pages/ExecutionsPage.vue` |
 
 `RiskTag` 在养殖池和水质页共用，`PlanDrawer` 在计划和执行页共用。`StatusBadge`、`MetricCard`、`ConfirmDialog` 位于 `frontend/src/components/common/`；`useAuth`、`useQueryParams` 位于 `frontend/src/hooks/`。
@@ -106,9 +108,10 @@ docker compose down
 | `GET/POST` | `/api/plans` | 投喂计划列表/创建 |
 | `PATCH` | `/api/plans/:id/submit` | 草稿提交审核 |
 | `PATCH` | `/api/plans/:id/approve` | 主管批准并校验水质 |
-| `PATCH` | `/api/plans/:id/revoke` | 撤销待审或已批准计划 |
-| `GET` | `/api/plans/recommendation?pondId=1&weather=晴朗` | 生成投喂建议 |
-| `GET/POST` | `/api/executions` | 执行记录列表/安排 |
+| `PATCH` | `/api/plans/:id/revoke` | 撤销待审或已批准计划（关联建议失效） |
+| `GET` | `/api/recommendations?pondId=1&validOnly=true` | 按养殖池查看有效投喂建议快照 |
+| `POST` | `/api/recommendations/generate` | 生成并保存带编号的投喂建议快照 |
+| `GET/POST` | `/api/executions` | 执行记录列表/安排（须携带 `recommendationSnapshotId`） |
 | `PATCH` | `/api/executions/:id/complete` | 提交实际数量与反馈 |
 | `GET` | `/api/audit` | 管理员/主管查看审计记录 |
 
@@ -145,6 +148,9 @@ docker compose config --quiet
 - 关闭养殖池不接受新水质读数或投喂计划。
 - 草稿每次编辑版本号加一；非草稿不能直接编辑。
 - 计划批准需要运行中养殖池和最新水质，溶解氧不得低于计划阈值。
-- 执行安排需要 24 小时内水质，严重异常或溶解氧不足会阻断流程。
+- 每次生成投喂建议都会得到连续编号快照；同一养殖池再次生成、录入新读数、计划撤销/修订、计划执行完成或养殖池退出运行时，旧快照失效并记录原因。
+- 安排执行必须引用一条当前有效的建议快照，且其养殖池、计划、计划版本需与所选一致；暂停（`hold`）建议不能安排执行。
+- 执行记录固化建议编号与依据（计划版本、水质读数时间与溶氧、天气窗口、调整比例、建议投喂量）。
+- 执行安排需要 24 小时内水质，严重异常或溶解氧不足会阻断流程；当日累计安排不得超过所选建议的日投喂量。
 - 实际量与计划量偏差超过 25% 时，必须提供至少 10 个字的说明。
 - 关联了读数、计划或执行记录的养殖池不允许删除。

@@ -1,28 +1,31 @@
 package service
 
 import (
+	"aquaculture-water-feeding-control/backend/internal/constants"
 	"aquaculture-water-feeding-control/backend/internal/dto"
 	"aquaculture-water-feeding-control/backend/internal/model"
 	"aquaculture-water-feeding-control/backend/internal/repository"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 )
 
 type PondService struct {
-	repo          *repository.PondRepository
-	audit         *AuditService
-	transactional bool
+	repo            *repository.PondRepository
+	recommendations *repository.RecommendationRepository
+	audit           *AuditService
+	transactional   bool
 }
 
 func (s *PondService) withinTransaction(fn func(*PondService) error) error {
 	return s.audit.WithinTransaction(func(tx *gorm.DB, audit *AuditService) error {
-		return fn(&PondService{repo: repository.NewPondRepository(tx), audit: audit, transactional: true})
+		return fn(&PondService{repo: repository.NewPondRepository(tx), recommendations: repository.NewRecommendationRepository(tx), audit: audit, transactional: true})
 	})
 }
 
-func NewPondService(repo *repository.PondRepository, audit *AuditService) *PondService {
-	return &PondService{repo: repo, audit: audit}
+func NewPondService(repo *repository.PondRepository, recommendations *repository.RecommendationRepository, audit *AuditService) *PondService {
+	return &PondService{repo: repo, recommendations: recommendations, audit: audit}
 }
 
 func (s *PondService) List(query dto.PageQuery) (dto.PageResult[model.Pond], error) {
@@ -99,6 +102,7 @@ func (s *PondService) Update(id uint, input dto.PondInput, actor Actor) (model.P
 		return model.Pond{}, NewError(CodeValidation, "养殖池状态无效")
 	}
 	before := pond
+	statusChangedToInactive := before.Status == constants.PondStatusActive && input.Status != constants.PondStatusActive
 	pond.Code = strings.ToUpper(strings.TrimSpace(input.Code))
 	pond.Name = strings.TrimSpace(input.Name)
 	pond.Species = strings.TrimSpace(input.Species)
@@ -113,6 +117,17 @@ func (s *PondService) Update(id uint, input dto.PondInput, actor Actor) (model.P
 			return model.Pond{}, NewError(CodeConflict, "养殖池编码已存在")
 		}
 		return model.Pond{}, WrapError(CodeInternal, "更新养殖池失败", err)
+	}
+	if statusChangedToInactive {
+		reason := InvalidReasonPondState
+		if input.Status == constants.PondStatusQuarantine {
+			reason = "养殖池已转为隔离观察，相关投喂建议失效"
+		} else if input.Status == constants.PondStatusClosed {
+			reason = "养殖池已关闭，相关投喂建议失效"
+		}
+		if _, err := s.recommendations.MarkPondInvalid(pond.ID, reason, time.Now().UTC()); err != nil {
+			return model.Pond{}, WrapError(CodeInternal, "失效相关投喂建议失败", err)
+		}
 	}
 	if err := s.audit.Record(actor, "update", "pond", pond.ID, before, pond, "更新基础信息或状态"); err != nil {
 		return model.Pond{}, err

@@ -6,11 +6,12 @@ import (
 )
 
 type ExecutionInput struct {
-	PondID          uint      `json:"pondId" binding:"required"`
-	FeedingPlanID   uint      `json:"feedingPlanId" binding:"required"`
-	ScheduledAt     time.Time `json:"scheduledAt" binding:"required"`
-	PlannedAmountKg float64   `json:"plannedAmountKg" binding:"required,gt=0"`
-	Weather         string    `json:"weather" binding:"max=120"`
+	PondID                   uint      `json:"pondId" binding:"required"`
+	FeedingPlanID            uint      `json:"feedingPlanId" binding:"required"`
+	RecommendationSnapshotID uint      `json:"recommendationSnapshotId" binding:"required"`
+	ScheduledAt              time.Time `json:"scheduledAt" binding:"required"`
+	PlannedAmountKg          float64   `json:"plannedAmountKg" binding:"required,gt=0"`
+	Weather                  string    `json:"weather" binding:"max=120"`
 }
 
 type UpdateExecutionInput struct {

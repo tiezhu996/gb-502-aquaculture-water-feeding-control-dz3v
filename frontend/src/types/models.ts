@@ -62,11 +62,46 @@ export interface FeedingPlan extends BaseModel {
   reviewedAt?: string
 }
 
+export interface FeedingRecommendation {
+  id: number
+  snapshotNo: string
+  pondId: number
+  pond?: Pond
+  feedingPlanId: number
+  feedingPlan?: FeedingPlan
+  waterReadingId?: number
+  planVersion: number
+  growthStage: string
+  readingMeasuredAt: string
+  dissolvedOxygen: number
+  temperature: number
+  ph: number
+  ammonia: number
+  turbidity: number
+  riskLevel: RiskLevel
+  weatherWindow: string
+  action: 'feed' | 'reduce' | 'hold'
+  dailyAmountKg: number
+  amountPerFeedingKg: number
+  frequencyPerDay: number
+  adjustmentPercent: number
+  reasons: string[]
+  generatedBy: string
+  valid: boolean
+  invalidReason: string
+  invalidatedAt?: string
+  createdAt: string
+}
+
 export interface ControlExecution extends BaseModel {
   pondId: number
   pond?: Pond
   feedingPlanId: number
   feedingPlan?: FeedingPlan
+  recommendationId?: number
+  recommendation?: FeedingRecommendation
+  recommendationNo: string
+  basis: string
   scheduledAt: string
   startedAt?: string
   completedAt?: string
@@ -89,21 +124,6 @@ export interface AuditLog extends BaseModel {
   toState: string
   reason: string
   requestId: string
-}
-
-export interface FeedingRecommendation {
-  pondId: number
-  planId: number
-  planVersion: number
-  generatedAt: string
-  readingMeasuredAt: string
-  weather: string
-  action: 'feed' | 'reduce' | 'hold'
-  dailyAmountKg: number
-  amountPerFeedingKg: number
-  frequencyPerDay: number
-  adjustmentPercent: number
-  reasons: string[]
 }
 
 export interface PageResult<T> {
@@ -163,6 +183,7 @@ export interface FeedingPlanInput {
 export interface ExecutionInput {
   pondId: number
   feedingPlanId: number
+  recommendationSnapshotId: number
   scheduledAt: string
   plannedAmountKg: number
   weather: string

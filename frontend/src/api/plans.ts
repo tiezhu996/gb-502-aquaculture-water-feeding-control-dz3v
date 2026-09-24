@@ -1,5 +1,5 @@
 import { client, type ApiEnvelope } from './client'
-import type { FeedingPlan, FeedingPlanInput, FeedingRecommendation, PageQuery, PageResult } from '@/types/models'
+import type { FeedingPlan, FeedingPlanInput, PageQuery, PageResult } from '@/types/models'
 
 export const planApi = {
   async list(params: PageQuery = {}) {
@@ -16,10 +16,6 @@ export const planApi = {
   },
   async transition(id: number, action: 'submit' | 'approve' | 'revoke', reason: string) {
     const response = await client.patch<ApiEnvelope<FeedingPlan>>(`/plans/${id}/${action}`, { reason })
-    return response.data.data
-  },
-  async recommendation(pondId: number, weather: string) {
-    const response = await client.get<ApiEnvelope<FeedingRecommendation>>('/plans/recommendation', { params: { pondId, weather } })
     return response.data.data
   },
   async remove(id: number) {

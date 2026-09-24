@@ -19,9 +19,14 @@ func NewAuditRepository(db *gorm.DB) *AuditRepository {
 }
 
 func (r *AuditRepository) Transaction(fn func(*gorm.DB) error) error {
+	// SQLite 不支持 SERIALIZABLE 隔离级别选项；仅 PostgreSQL 启用序列化事务。
+	isolation := sql.LevelSerializable
+	if r.db.Dialector.Name() != "postgres" {
+		isolation = sql.LevelDefault
+	}
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		err = r.db.Transaction(fn, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		err = r.db.Transaction(fn, &sql.TxOptions{Isolation: isolation})
 		if !retryableTransactionError(err) {
 			return err
 		}

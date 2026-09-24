@@ -30,6 +30,7 @@ func Open(databaseURL, environment string) (*gorm.DB, error) {
 		&model.Pond{},
 		&model.WaterReading{},
 		&model.FeedingPlan{},
+		&model.FeedingRecommendation{},
 		&model.ControlExecution{},
 		&model.AuditLog{},
 	); err != nil {
