@@ -1,4 +1,4 @@
-import type { ExecutionStatus, PlanStatus, PondStatus, RiskLevel, UserRole } from './enums'
+import type { ExecutionStatus, PlanStatus, PondStatus, RecommendationStatus, RiskLevel, UserRole } from './enums'
 
 export interface BaseModel {
   id: number
@@ -67,6 +67,10 @@ export interface ControlExecution extends BaseModel {
   pond?: Pond
   feedingPlanId: number
   feedingPlan?: FeedingPlan
+  recommendationId?: number
+  recommendation?: RecommendationSnapshot
+  recommendationCode: string
+  basis: string
   scheduledAt: string
   startedAt?: string
   completedAt?: string
@@ -91,12 +95,21 @@ export interface AuditLog extends BaseModel {
   requestId: string
 }
 
-export interface FeedingRecommendation {
+export interface RecommendationSnapshot extends BaseModel {
+  code: string
   pondId: number
-  planId: number
+  pond?: Pond
+  feedingPlanId: number
+  feedingPlan?: FeedingPlan
   planVersion: number
-  generatedAt: string
+  waterReadingId: number
   readingMeasuredAt: string
+  dissolvedOxygen: number
+  temperature: number
+  ph: number
+  ammonia: number
+  turbidity: number
+  riskLevel: RiskLevel
   weather: string
   action: 'feed' | 'reduce' | 'hold'
   dailyAmountKg: number
@@ -104,6 +117,10 @@ export interface FeedingRecommendation {
   frequencyPerDay: number
   adjustmentPercent: number
   reasons: string[]
+  status: RecommendationStatus
+  invalidReason: string
+  invalidatedAt?: string
+  generatedBy: string
 }
 
 export interface PageResult<T> {
@@ -163,6 +180,7 @@ export interface FeedingPlanInput {
 export interface ExecutionInput {
   pondId: number
   feedingPlanId: number
+  recommendationId: number
   scheduledAt: string
   plannedAmountKg: number
   weather: string

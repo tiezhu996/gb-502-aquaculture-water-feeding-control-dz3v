@@ -69,3 +69,14 @@ const (
 	ExecutionCompleted ExecutionStatus = "completed"
 	ExecutionCancelled ExecutionStatus = "cancelled"
 )
+
+type RecommendationStatus string
+
+const (
+	RecommendationValid   RecommendationStatus = "valid"
+	RecommendationInvalid RecommendationStatus = "invalid"
+)
+
+func (s RecommendationStatus) Valid() bool {
+	return s == RecommendationValid || s == RecommendationInvalid
+}

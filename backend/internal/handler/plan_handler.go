@@ -31,20 +31,6 @@ func (h *PlanHandler) List(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": result})
 }
 
-func (h *PlanHandler) Recommendation(c *gin.Context) {
-	pondID, err := strconv.ParseUint(c.Query("pondId"), 10, 64)
-	if err != nil || pondID == 0 {
-		respondError(c, service.NewError(service.CodeValidation, "请选择养殖池"))
-		return
-	}
-	result, err := h.service.Recommendation(uint(pondID), c.Query("weather"))
-	if err != nil {
-		respondError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"data": result})
-}
-
 func (h *PlanHandler) Get(c *gin.Context) {
 	id, ok := parseID(c)
 	if !ok {

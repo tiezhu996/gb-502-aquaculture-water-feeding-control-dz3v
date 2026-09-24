@@ -2,6 +2,7 @@ export type PondStatus = 'active' | 'quarantine' | 'closed'
 export type PlanStatus = 'draft' | 'pending' | 'approved' | 'executed'
 export type RiskLevel = 'normal' | 'warning' | 'critical'
 export type ExecutionStatus = 'scheduled' | 'running' | 'completed' | 'cancelled'
+export type RecommendationStatus = 'valid' | 'invalid'
 export type UserRole = 'admin' | 'manager' | 'operator' | 'viewer'
 
 export const pondStatusLabels: Record<PondStatus, string> = {
@@ -28,4 +29,9 @@ export const executionStatusLabels: Record<ExecutionStatus, string> = {
   running: '执行中',
   completed: '已完成',
   cancelled: '已取消',
+}
+
+export const recommendationStatusLabels: Record<RecommendationStatus, string> = {
+  valid: '有效',
+  invalid: '已失效',
 }

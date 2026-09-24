@@ -14,13 +14,14 @@ import (
 )
 
 type Handlers struct {
-	Auth       *handler.AuthHandler
-	Health     *handler.HealthHandler
-	Ponds      *handler.PondHandler
-	Readings   *handler.ReadingHandler
-	Plans      *handler.PlanHandler
-	Executions *handler.ExecutionHandler
-	Audit      *handler.AuditHandler
+	Auth            *handler.AuthHandler
+	Health          *handler.HealthHandler
+	Ponds           *handler.PondHandler
+	Readings        *handler.ReadingHandler
+	Plans           *handler.PlanHandler
+	Recommendations *handler.RecommendationHandler
+	Executions      *handler.ExecutionHandler
+	Audit           *handler.AuditHandler
 }
 
 func New(cfg config.Config, redisClient *redis.Client, auth *service.AuthService, h Handlers) *gin.Engine {
@@ -67,7 +68,6 @@ func New(cfg config.Config, redisClient *redis.Client, auth *service.AuthService
 	readingDelete.DELETE("/:id", h.Readings.Delete)
 
 	protected.GET("/plans", h.Plans.List)
-	protected.GET("/plans/recommendation", h.Plans.Recommendation)
 	protected.GET("/plans/:id", h.Plans.Get)
 	planWrite := protected.Group("/plans")
 	planWrite.Use(middleware.RequireRoles("admin", "manager", "operator"))
@@ -79,6 +79,12 @@ func New(cfg config.Config, redisClient *redis.Client, auth *service.AuthService
 	planReview.PATCH("/:id/approve", h.Plans.Approve)
 	planReview.PATCH("/:id/revoke", h.Plans.Revoke)
 	planReview.DELETE("/:id", h.Plans.Delete)
+
+	protected.GET("/recommendations", h.Recommendations.List)
+	protected.GET("/recommendations/:id", h.Recommendations.Get)
+	recommendationWrite := protected.Group("/recommendations")
+	recommendationWrite.Use(middleware.RequireRoles("admin", "manager", "operator"))
+	recommendationWrite.POST("", h.Recommendations.Create)
 
 	protected.GET("/executions", h.Executions.List)
 	protected.GET("/executions/:id", h.Executions.Get)

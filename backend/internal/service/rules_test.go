@@ -3,8 +3,10 @@ package service
 import (
 	"aquaculture-water-feeding-control/backend/internal/constants"
 	"aquaculture-water-feeding-control/backend/internal/dto"
+	"aquaculture-water-feeding-control/backend/internal/model"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestAssessWaterRisk(t *testing.T) {
@@ -133,5 +135,20 @@ func TestExecutionStatusCannotMoveBackToScheduled(t *testing.T) {
 	}
 	if constants.ExecutionCompleted.CanTransitionTo(constants.ExecutionRunning) {
 		t.Fatal("completed execution must be terminal")
+	}
+}
+
+func TestComposeExecutionBasis(t *testing.T) {
+	recommendation := model.Recommendation{
+		Code: "REC-000007", PlanVersion: 3, ReadingMeasuredAt: time.Date(2026, 9, 24, 8, 30, 0, 0, time.UTC),
+		DissolvedOxygen: 6.4, RiskLevel: constants.RiskWarning, Weather: "小雨",
+		AdjustmentPercent: -30, AmountPerFeedingKg: 23.33, FrequencyPerDay: 3,
+	}
+	plan := model.FeedingPlan{Name: "秋季育肥计划", DailyAmountKg: 100}
+	basis := composeExecutionBasis(recommendation, plan)
+	for _, part := range []string{"REC-000007", "秋季育肥计划", "v3", "2026-09-24 08:30", "6.40", "warning", "小雨", "-30.0%", "23.33"} {
+		if !strings.Contains(basis, part) {
+			t.Fatalf("basis %q does not contain %q", basis, part)
+		}
 	}
 }

@@ -4,12 +4,13 @@ import { ElMessage } from 'element-plus'
 import { CircleCheck, Clock, DocumentChecked, Plus, Search, TrendCharts } from '@element-plus/icons-vue'
 import { planApi } from '@/api/plans'
 import { pondApi } from '@/api/ponds'
+import { recommendationApi } from '@/api/recommendations'
 import MetricCard from '@/components/common/MetricCard.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import PlanDrawer from '@/components/common/PlanDrawer.vue'
 import { useAuth } from '@/hooks/useAuth'
 import { useQueryParams } from '@/hooks/useQueryParams'
-import type { FeedingPlan, FeedingPlanInput, FeedingRecommendation, Pond } from '@/types/models'
+import type { FeedingPlan, FeedingPlanInput, Pond, RecommendationSnapshot } from '@/types/models'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime, formatNumber, toISO, toLocalInput } from '@/utils/format'
 
@@ -31,7 +32,11 @@ const transitionReason = ref('')
 const startLocal = ref(toLocalInput())
 const endLocal = ref(toLocalInput(new Date(Date.now() + 30 * 86400000)))
 const weather = ref('晴朗，微风')
-const recommendation = ref<FeedingRecommendation | null>(null)
+const recommendation = ref<RecommendationSnapshot | null>(null)
+const recommendations = ref<RecommendationSnapshot[]>([])
+const recTotal = ref(0)
+const recLoading = ref(false)
+const recFilter = reactive({ pondId: '', status: '', page: 1 })
 const emptyForm = (): FeedingPlanInput => ({ pondId: 0, name: '', dailyAmountKg: 0, frequencyPerDay: 3, feedType: '', targetGrowthStage: '', minOxygen: 5, startDate: '', endDate: '', rationale: '' })
 const form = reactive<FeedingPlanInput>(emptyForm())
 
@@ -54,6 +59,19 @@ async function load() {
     ElMessage.error(errorMessage(error))
   } finally {
     loading.value = false
+  }
+}
+
+async function loadRecommendations() {
+  recLoading.value = true
+  try {
+    const result = await recommendationApi.list({ page: recFilter.page, pageSize: 20, pondId: Number(recFilter.pondId) || undefined, status: recFilter.status || undefined })
+    recommendations.value = result.items
+    recTotal.value = result.total
+  } catch (error) {
+    ElMessage.error(errorMessage(error))
+  } finally {
+    recLoading.value = false
   }
 }
 
@@ -114,7 +132,7 @@ async function transition() {
     await planApi.transition(selected.value.id, transitionAction.value, transitionReason.value)
     ElMessage.success(`${transitionTitle.value}成功`)
     transitionOpen.value = false
-    await load()
+    await Promise.all([load(), loadRecommendations()])
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -138,7 +156,8 @@ async function generateRecommendation(plan: FeedingPlan) {
   recommendationOpen.value = true
   saving.value = true
   try {
-    recommendation.value = await planApi.recommendation(plan.pondId, weather.value)
+    recommendation.value = await recommendationApi.create({ pondId: plan.pondId, weather: weather.value })
+    await loadRecommendations()
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -148,7 +167,8 @@ async function generateRecommendation(plan: FeedingPlan) {
 
 let timer: number | undefined
 watch(params, () => { window.clearTimeout(timer); timer = window.setTimeout(load, 200) }, { deep: true })
-onMounted(load)
+watch(recFilter, () => { void loadRecommendations() }, { deep: true })
+onMounted(() => { void load(); void loadRecommendations() })
 </script>
 
 <template>
@@ -185,6 +205,30 @@ onMounted(load)
       </el-table>
       <div class="pagination"><el-pagination v-model:current-page="params.page" layout="total, prev, pager, next" :total="total" :page-size="20" /></div>
     </section>
+    <section class="workspace-panel">
+      <div class="panel-toolbar">
+        <div class="filters">
+          <span class="panel-title">建议快照</span>
+          <el-select v-model="recFilter.pondId" placeholder="全部养殖池" clearable><el-option v-for="pond in ponds" :key="pond.id" :label="pond.name" :value="String(pond.id)" /></el-select>
+          <el-select v-model="recFilter.status" placeholder="全部状态" clearable><el-option label="有效" value="valid" /><el-option label="已失效" value="invalid" /></el-select>
+        </div>
+        <span class="panel-hint">每次生成建议都会保存为带编号快照；出现新水质、计划撤销或审批变化后旧建议自动失效</span>
+      </div>
+      <el-table v-loading="recLoading" :data="recommendations" stripe empty-text="暂无建议快照">
+        <el-table-column label="编号" width="120"><template #default="{ row }"><strong>{{ row.code }}</strong></template></el-table-column>
+        <el-table-column label="养殖池 / 计划" min-width="200"><template #default="{ row }"><div class="primary-cell"><span>{{ row.pond?.name }}</span><small>{{ row.feedingPlan?.name }} · v{{ row.planVersion }}</small></div></template></el-table-column>
+        <el-table-column label="水质读数" min-width="180"><template #default="{ row }"><div class="primary-cell"><span>溶氧 {{ row.dissolvedOxygen }} mg/L · {{ row.temperature }}℃</span><small>测量于 {{ formatDateTime(row.readingMeasuredAt) }}</small></div></template></el-table-column>
+        <el-table-column label="天气窗口" prop="weather" min-width="110" show-overflow-tooltip><template #default="{ row }">{{ row.weather || '—' }}</template></el-table-column>
+        <el-table-column label="调整比例" width="100"><template #default="{ row }">{{ row.adjustmentPercent > 0 ? '+' : '' }}{{ row.adjustmentPercent }}%</template></el-table-column>
+        <el-table-column label="建议投喂" min-width="140"><template #default="{ row }"><div class="primary-cell"><span>{{ row.action === 'hold' ? '暂停投喂' : `${row.dailyAmountKg} kg/日` }}</span><small>{{ row.amountPerFeedingKg }} kg × {{ row.frequencyPerDay }} 次</small></div></template></el-table-column>
+        <el-table-column label="状态" min-width="200"><template #default="{ row }">
+          <el-tag v-if="row.status === 'valid'" type="success">有效</el-tag>
+          <div v-else class="primary-cell"><el-tag type="info">已失效</el-tag><small class="invalid-reason">{{ row.invalidReason }}</small></div>
+        </template></el-table-column>
+        <el-table-column label="生成时间" min-width="160"><template #default="{ row }">{{ formatDateTime(row.createdAt) }}<small class="cell-sub"> · {{ row.generatedBy }}</small></template></el-table-column>
+      </el-table>
+      <div class="pagination"><el-pagination v-model:current-page="recFilter.page" layout="total, prev, pager, next" :total="recTotal" :page-size="20" /></div>
+    </section>
     <el-dialog v-model="editorOpen" :title="editingId ? '编辑计划新版本' : '新建投喂计划'" width="720px">
       <el-form label-position="top" class="form-grid">
         <el-form-item label="养殖池"><el-select v-model="form.pondId"><el-option v-for="pond in ponds.filter((item) => item.status !== 'closed')" :key="pond.id" :label="`${pond.name} · ${pond.growthStage}`" :value="pond.id" /></el-select></el-form-item>
@@ -206,10 +250,11 @@ onMounted(load)
       <el-form-item class="dialog-field" label="变更原因"><el-input v-model="transitionReason" type="textarea" :rows="4" /></el-form-item>
       <template #footer><el-button @click="transitionOpen = false">取消</el-button><el-button type="primary" :loading="saving" @click="transition">确认{{ transitionTitle }}</el-button></template>
     </el-dialog>
-    <el-dialog v-model="recommendationOpen" title="实时投喂建议" width="560px">
-      <el-form-item label="天气窗口"><div class="inline-action"><el-input v-model="weather" placeholder="例：晴朗、小雨、暴雨" /><el-button :loading="saving" @click="selected && generateRecommendation(selected)">重新计算</el-button></div></el-form-item>
+    <el-dialog v-model="recommendationOpen" title="生成投喂建议" width="560px">
+      <el-form-item label="天气窗口"><div class="inline-action"><el-input v-model="weather" placeholder="例：晴朗、小雨、暴雨" /><el-button :loading="saving" @click="selected && generateRecommendation(selected)">重新生成</el-button></div></el-form-item>
       <div v-if="recommendation" class="recommendation-result" :data-action="recommendation.action">
         <div class="recommendation-main"><span>{{ recommendation.action === 'hold' ? '暂停投喂' : recommendation.action === 'reduce' ? '减量投喂' : '按计划投喂' }}</span><strong>{{ recommendation.dailyAmountKg }} kg/日</strong><small>{{ recommendation.amountPerFeedingKg }} kg × {{ recommendation.frequencyPerDay }} 次</small></div>
+        <el-alert :title="`已保存为建议快照 ${recommendation.code}，安排执行时须引用该编号`" type="success" :closable="false" show-icon />
         <ul><li v-for="reason in recommendation.reasons" :key="reason">{{ reason }}</li></ul>
       </div>
       <el-skeleton v-else :rows="4" animated />

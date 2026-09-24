@@ -5,6 +5,7 @@ import (
 	"aquaculture-water-feeding-control/backend/internal/dto"
 	"aquaculture-water-feeding-control/backend/internal/model"
 	"aquaculture-water-feeding-control/backend/internal/repository"
+	"fmt"
 	"math"
 	"time"
 
@@ -12,12 +13,13 @@ import (
 )
 
 type ExecutionService struct {
-	repo          *repository.ExecutionRepository
-	plans         *repository.PlanRepository
-	ponds         *repository.PondRepository
-	readings      *repository.ReadingRepository
-	audit         *AuditService
-	transactional bool
+	repo            *repository.ExecutionRepository
+	plans           *repository.PlanRepository
+	ponds           *repository.PondRepository
+	readings        *repository.ReadingRepository
+	recommendations *repository.RecommendationRepository
+	audit           *AuditService
+	transactional   bool
 }
 
 func (s *ExecutionService) withinTransaction(fn func(*ExecutionService) error) error {
@@ -25,14 +27,15 @@ func (s *ExecutionService) withinTransaction(fn func(*ExecutionService) error) e
 		scoped := &ExecutionService{
 			repo: repository.NewExecutionRepository(tx), plans: repository.NewPlanRepository(tx),
 			ponds: repository.NewPondRepository(tx), readings: repository.NewReadingRepository(tx),
-			audit: audit, transactional: true,
+			recommendations: repository.NewRecommendationRepository(tx),
+			audit:           audit, transactional: true,
 		}
 		return fn(scoped)
 	})
 }
 
-func NewExecutionService(repo *repository.ExecutionRepository, plans *repository.PlanRepository, ponds *repository.PondRepository, readings *repository.ReadingRepository, audit *AuditService) *ExecutionService {
-	return &ExecutionService{repo: repo, plans: plans, ponds: ponds, readings: readings, audit: audit}
+func NewExecutionService(repo *repository.ExecutionRepository, plans *repository.PlanRepository, ponds *repository.PondRepository, readings *repository.ReadingRepository, recommendations *repository.RecommendationRepository, audit *AuditService) *ExecutionService {
+	return &ExecutionService{repo: repo, plans: plans, ponds: ponds, readings: readings, recommendations: recommendations, audit: audit}
 }
 
 func (s *ExecutionService) List(query dto.PageQuery, pondID, planID uint) (dto.PageResult[model.ControlExecution], error) {
@@ -71,14 +74,36 @@ func (s *ExecutionService) Create(input dto.ExecutionInput, actor Actor) (model.
 		})
 		return result, err
 	}
+	recommendation, err := s.recommendations.GetForUpdate(input.RecommendationID)
+	if err == gorm.ErrRecordNotFound {
+		return model.ControlExecution{}, NewError(CodeValidation, "建议快照不存在，请先生成投喂建议")
+	}
+	if err != nil {
+		return model.ControlExecution{}, WrapError(CodeInternal, "查询建议快照失败", err)
+	}
+	if recommendation.Status != constants.RecommendationValid {
+		message := "建议快照 " + recommendation.Code + " 已失效"
+		if recommendation.InvalidReason != "" {
+			message += "：" + recommendation.InvalidReason
+		}
+		return model.ControlExecution{}, NewError(CodeConflict, message+"，请重新生成建议")
+	}
+	if recommendation.PondID != input.PondID || recommendation.FeedingPlanID != input.FeedingPlanID {
+		return model.ControlExecution{}, NewError(CodeValidation, "建议快照与所选养殖池或计划不匹配")
+	}
 	plan, pond, latest, err := s.validateExecution(input.PondID, input.FeedingPlanID, input.PlannedAmountKg, input.ScheduledAt, 0)
 	if err != nil {
 		return model.ControlExecution{}, err
+	}
+	if recommendation.PlanVersion != plan.Version {
+		return model.ControlExecution{}, NewError(CodeConflict, "建议快照基于计划 v"+fmt.Sprint(recommendation.PlanVersion)+"，当前计划已变更，请重新生成建议")
 	}
 	execution := model.ControlExecution{
 		PondID: input.PondID, FeedingPlanID: input.FeedingPlanID, ScheduledAt: input.ScheduledAt.UTC(),
 		PlannedAmountKg: input.PlannedAmountKg, Status: constants.ExecutionScheduled,
 		Operator: actor.DisplayName, Weather: input.Weather, OxygenSnapshot: latest.DissolvedOxygen,
+		RecommendationID: &recommendation.ID, RecommendationCode: recommendation.Code,
+		Basis: composeExecutionBasis(recommendation, plan),
 	}
 	if execution.Operator == "" {
 		execution.Operator = actor.Username
@@ -88,10 +113,19 @@ func (s *ExecutionService) Create(input dto.ExecutionInput, actor Actor) (model.
 	}
 	execution.Pond = &pond
 	execution.FeedingPlan = &plan
-	if err := s.audit.Record(actor, "schedule", "control_execution", execution.ID, nil, execution, "根据已批准计划安排投喂"); err != nil {
+	execution.Recommendation = &recommendation
+	if err := s.audit.Record(actor, "schedule", "control_execution", execution.ID, nil, execution, "依据建议快照 "+recommendation.Code+" 安排投喂"); err != nil {
 		return model.ControlExecution{}, err
 	}
 	return execution, nil
+}
+
+// composeExecutionBasis 把快照编号、计划版本、水质读数、天气窗口和调整比例写成可审计的依据文本。
+func composeExecutionBasis(recommendation model.Recommendation, plan model.FeedingPlan) string {
+	return fmt.Sprintf("建议 %s：计划《%s》v%d（日投喂 %.2f kg），水质读数 %s（溶氧 %.2f mg/L，风险 %s），天气窗口「%s」，调整比例 %.1f%%，建议每次 %.2f kg × %d 次",
+		recommendation.Code, plan.Name, recommendation.PlanVersion, plan.DailyAmountKg,
+		recommendation.ReadingMeasuredAt.UTC().Format("2006-01-02 15:04"), recommendation.DissolvedOxygen, recommendation.RiskLevel,
+		recommendation.Weather, recommendation.AdjustmentPercent, recommendation.AmountPerFeedingKg, recommendation.FrequencyPerDay)
 }
 
 func (s *ExecutionService) Update(id uint, input dto.UpdateExecutionInput, actor Actor) (model.ControlExecution, error) {

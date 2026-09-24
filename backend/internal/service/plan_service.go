@@ -6,108 +6,33 @@ import (
 	"aquaculture-water-feeding-control/backend/internal/model"
 	"aquaculture-water-feeding-control/backend/internal/repository"
 	"fmt"
-	"math"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
 )
 
 type PlanService struct {
-	repo          *repository.PlanRepository
-	ponds         *repository.PondRepository
-	readings      *repository.ReadingRepository
-	audit         *AuditService
-	transactional bool
+	repo            *repository.PlanRepository
+	ponds           *repository.PondRepository
+	readings        *repository.ReadingRepository
+	recommendations *repository.RecommendationRepository
+	audit           *AuditService
+	transactional   bool
 }
 
 func (s *PlanService) withinTransaction(fn func(*PlanService) error) error {
 	return s.audit.WithinTransaction(func(tx *gorm.DB, audit *AuditService) error {
 		scoped := &PlanService{
 			repo: repository.NewPlanRepository(tx), ponds: repository.NewPondRepository(tx),
-			readings: repository.NewReadingRepository(tx), audit: audit, transactional: true,
+			readings: repository.NewReadingRepository(tx), recommendations: repository.NewRecommendationRepository(tx),
+			audit: audit, transactional: true,
 		}
 		return fn(scoped)
 	})
 }
 
-func (s *PlanService) Recommendation(pondID uint, weather string) (dto.FeedingRecommendation, error) {
-	pond, err := s.ponds.Get(pondID)
-	if err == gorm.ErrRecordNotFound {
-		return dto.FeedingRecommendation{}, NewError(CodeNotFound, "养殖池不存在")
-	}
-	if err != nil {
-		return dto.FeedingRecommendation{}, WrapError(CodeInternal, "查询养殖池失败", err)
-	}
-	if pond.Status != constants.PondStatusActive {
-		return dto.FeedingRecommendation{}, NewError(CodeConflict, "只能为运行中养殖池生成投喂建议")
-	}
-	plan, err := s.repo.LatestApprovedForPond(pondID)
-	if err == gorm.ErrRecordNotFound {
-		return dto.FeedingRecommendation{}, NewError(CodeConflict, "当前养殖池没有已批准的投喂计划")
-	}
-	if err != nil {
-		return dto.FeedingRecommendation{}, WrapError(CodeInternal, "查询已批准计划失败", err)
-	}
-	reading, err := s.readings.LatestForPond(pondID)
-	if err == gorm.ErrRecordNotFound {
-		return dto.FeedingRecommendation{}, NewError(CodeConflict, "生成建议前必须有水质读数")
-	}
-	if err != nil {
-		return dto.FeedingRecommendation{}, WrapError(CodeInternal, "查询最新水质读数失败", err)
-	}
-	if time.Since(reading.MeasuredAt) > 24*time.Hour {
-		return dto.FeedingRecommendation{}, NewError(CodeConflict, "最新水质读数已超过 24 小时，请先采集新读数")
-	}
-
-	factor := 1.0
-	reasons := []string{"以已批准计划 v" + fmt.Sprint(plan.Version) + " 为基准"}
-	action := "feed"
-	if reading.RiskLevel == constants.RiskCritical || reading.DissolvedOxygen < plan.MinOxygen {
-		factor = 0
-		action = "hold"
-		reasons = append(reasons, "水质严重异常或溶解氧低于计划阈值，暂停投喂")
-	} else {
-		if reading.RiskLevel == constants.RiskWarning {
-			factor *= 0.7
-			action = "reduce"
-			reasons = append(reasons, "存在水质预警，建议减量 30%")
-		}
-		if reading.Temperature < 20 || reading.Temperature > 31 {
-			factor *= 0.8
-			action = "reduce"
-			reasons = append(reasons, "水温不在最佳摄食区间，追加减量 20%")
-		}
-		weatherText := strings.ToLower(strings.TrimSpace(weather))
-		if strings.Contains(weatherText, "storm") || strings.Contains(weather, "暴雨") || strings.Contains(weather, "雷雨") {
-			factor = 0
-			action = "hold"
-			reasons = append(reasons, "强对流天气窗口不适合投喂")
-		} else if strings.Contains(weatherText, "rain") || strings.Contains(weather, "小雨") || strings.Contains(weather, "大风") {
-			factor *= 0.85
-			action = "reduce"
-			reasons = append(reasons, "天气窗口不稳定，追加减量 15%")
-		}
-		if strings.Contains(pond.GrowthStage, "幼") {
-			factor *= 0.9
-			reasons = append(reasons, "幼体阶段采用少量多餐系数")
-		}
-	}
-	dailyAmount := math.Round(plan.DailyAmountKg*factor*100) / 100
-	perFeeding := 0.0
-	if plan.FrequencyPerDay > 0 {
-		perFeeding = math.Round(dailyAmount/float64(plan.FrequencyPerDay)*100) / 100
-	}
-	return dto.FeedingRecommendation{
-		PondID: pondID, PlanID: plan.ID, PlanVersion: plan.Version, GeneratedAt: time.Now().UTC(),
-		ReadingMeasuredAt: reading.MeasuredAt, Weather: weather, Action: action, DailyAmountKg: dailyAmount,
-		AmountPerFeedingKg: perFeeding, FrequencyPerDay: plan.FrequencyPerDay,
-		AdjustmentPercent: math.Round((factor-1)*10000) / 100, Reasons: reasons,
-	}, nil
-}
-
-func NewPlanService(repo *repository.PlanRepository, ponds *repository.PondRepository, readings *repository.ReadingRepository, audit *AuditService) *PlanService {
-	return &PlanService{repo: repo, ponds: ponds, readings: readings, audit: audit}
+func NewPlanService(repo *repository.PlanRepository, ponds *repository.PondRepository, readings *repository.ReadingRepository, recommendations *repository.RecommendationRepository, audit *AuditService) *PlanService {
+	return &PlanService{repo: repo, ponds: ponds, readings: readings, recommendations: recommendations, audit: audit}
 }
 
 func (s *PlanService) List(query dto.PageQuery, pondID uint) (dto.PageResult[model.FeedingPlan], error) {
@@ -267,6 +192,10 @@ func (s *PlanService) Approve(id uint, reason string, actor Actor) (model.Feedin
 	if err := s.repo.Save(&plan); err != nil {
 		return model.FeedingPlan{}, WrapError(CodeInternal, "批准投喂计划失败", err)
 	}
+	invalidateReason := fmt.Sprintf("计划审批变化：已批准《%s》v%d，此前生成的建议失效", plan.Name, plan.Version)
+	if _, err := s.recommendations.InvalidateValidForPond(plan.PondID, invalidateReason, now); err != nil {
+		return model.FeedingPlan{}, WrapError(CodeInternal, "失效旧建议快照失败", err)
+	}
 	return plan, s.audit.Record(actor, "approve", "feeding_plan", plan.ID, before, plan, reason)
 }
 
@@ -301,6 +230,10 @@ func (s *PlanService) Revoke(id uint, reason string, actor Actor) (model.Feeding
 	plan.ReviewedAt = nil
 	if err := s.repo.Save(&plan); err != nil {
 		return model.FeedingPlan{}, WrapError(CodeInternal, "撤销投喂计划失败", err)
+	}
+	invalidateReason := fmt.Sprintf("关联计划《%s》已撤销并退回草稿", plan.Name)
+	if _, err := s.recommendations.InvalidateValidForPlan(plan.ID, invalidateReason, time.Now().UTC()); err != nil {
+		return model.FeedingPlan{}, WrapError(CodeInternal, "失效旧建议快照失败", err)
 	}
 	return plan, s.audit.Record(actor, "revoke", "feeding_plan", plan.ID, before, plan, reason)
 }

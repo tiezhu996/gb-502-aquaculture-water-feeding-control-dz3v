@@ -13,21 +13,25 @@ import (
 )
 
 type ReadingService struct {
-	repo          *repository.ReadingRepository
-	ponds         *repository.PondRepository
-	audit         *AuditService
-	transactional bool
+	repo            *repository.ReadingRepository
+	ponds           *repository.PondRepository
+	recommendations *repository.RecommendationRepository
+	audit           *AuditService
+	transactional   bool
 }
 
 func (s *ReadingService) withinTransaction(fn func(*ReadingService) error) error {
 	return s.audit.WithinTransaction(func(tx *gorm.DB, audit *AuditService) error {
-		scoped := &ReadingService{repo: repository.NewReadingRepository(tx), ponds: repository.NewPondRepository(tx), audit: audit, transactional: true}
+		scoped := &ReadingService{
+			repo: repository.NewReadingRepository(tx), ponds: repository.NewPondRepository(tx),
+			recommendations: repository.NewRecommendationRepository(tx), audit: audit, transactional: true,
+		}
 		return fn(scoped)
 	})
 }
 
-func NewReadingService(repo *repository.ReadingRepository, ponds *repository.PondRepository, audit *AuditService) *ReadingService {
-	return &ReadingService{repo: repo, ponds: ponds, audit: audit}
+func NewReadingService(repo *repository.ReadingRepository, ponds *repository.PondRepository, recommendations *repository.RecommendationRepository, audit *AuditService) *ReadingService {
+	return &ReadingService{repo: repo, ponds: ponds, recommendations: recommendations, audit: audit}
 }
 
 func (s *ReadingService) List(query dto.PageQuery, pondID uint, unconfirmed bool) (dto.PageResult[model.WaterReading], error) {
@@ -89,6 +93,10 @@ func (s *ReadingService) Create(input dto.WaterReadingInput, actor Actor) (model
 		return model.WaterReading{}, WrapError(CodeInternal, "创建水质读数失败", err)
 	}
 	reading.Pond = &pond
+	invalidateReason := fmt.Sprintf("出现更新的水质读数（测量时间 %s）", reading.MeasuredAt.UTC().Format("2006-01-02 15:04"))
+	if _, err := s.recommendations.InvalidateValidForPond(reading.PondID, invalidateReason, time.Now().UTC()); err != nil {
+		return model.WaterReading{}, WrapError(CodeInternal, "失效旧建议快照失败", err)
+	}
 	if err := s.audit.Record(actor, "create", "water_reading", reading.ID, nil, reading, message); err != nil {
 		return model.WaterReading{}, err
 	}
@@ -146,6 +154,10 @@ func (s *ReadingService) Delete(id uint, actor Actor) error {
 	}
 	if err := s.repo.Delete(&reading); err != nil {
 		return WrapError(CodeInternal, "删除水质读数失败", err)
+	}
+	invalidateReason := fmt.Sprintf("依据的水质读数（测量时间 %s）已删除", reading.MeasuredAt.UTC().Format("2006-01-02 15:04"))
+	if _, err := s.recommendations.InvalidateValidForReading(reading.ID, invalidateReason, time.Now().UTC()); err != nil {
+		return WrapError(CodeInternal, "失效旧建议快照失败", err)
 	}
 	return s.audit.Record(actor, "delete", "water_reading", reading.ID, reading, nil, "删除手工录入读数")
 }

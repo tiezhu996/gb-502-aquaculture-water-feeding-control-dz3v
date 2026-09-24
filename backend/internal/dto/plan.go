@@ -18,18 +18,3 @@ type FeedingPlanInput struct {
 type TransitionPlanInput struct {
 	Reason string `json:"reason" binding:"required,min=2,max=500"`
 }
-
-type FeedingRecommendation struct {
-	PondID             uint      `json:"pondId"`
-	PlanID             uint      `json:"planId"`
-	PlanVersion        int       `json:"planVersion"`
-	GeneratedAt        time.Time `json:"generatedAt"`
-	ReadingMeasuredAt  time.Time `json:"readingMeasuredAt"`
-	Weather            string    `json:"weather"`
-	Action             string    `json:"action"`
-	DailyAmountKg      float64   `json:"dailyAmountKg"`
-	AmountPerFeedingKg float64   `json:"amountPerFeedingKg"`
-	FrequencyPerDay    int       `json:"frequencyPerDay"`
-	AdjustmentPercent  float64   `json:"adjustmentPercent"`
-	Reasons            []string  `json:"reasons"`
-}

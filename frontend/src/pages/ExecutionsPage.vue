@@ -5,13 +5,14 @@ import { CircleCheck, Clock, List, Plus, VideoPlay } from '@element-plus/icons-v
 import { executionApi } from '@/api/executions'
 import { planApi } from '@/api/plans'
 import { pondApi } from '@/api/ponds'
+import { recommendationApi } from '@/api/recommendations'
 import MetricCard from '@/components/common/MetricCard.vue'
 import StatusBadge from '@/components/common/StatusBadge.vue'
 import PlanDrawer from '@/components/common/PlanDrawer.vue'
 import ConfirmDialog from '@/components/common/ConfirmDialog.vue'
 import { useAuth } from '@/hooks/useAuth'
 import { useQueryParams } from '@/hooks/useQueryParams'
-import type { ControlExecution, ExecutionInput, FeedingPlan, Pond } from '@/types/models'
+import type { ControlExecution, ExecutionInput, FeedingPlan, Pond, RecommendationSnapshot } from '@/types/models'
 import { errorMessage } from '@/utils/errors'
 import { formatDateTime, formatNumber, toISO, toLocalInput } from '@/utils/format'
 
@@ -20,6 +21,7 @@ const { params } = useQueryParams({ status: '', pondId: '', page: 1 })
 const executions = ref<ControlExecution[]>([])
 const ponds = ref<Pond[]>([])
 const plans = ref<FeedingPlan[]>([])
+const recommendations = ref<RecommendationSnapshot[]>([])
 const total = ref(0)
 const loading = ref(false)
 const saving = ref(false)
@@ -30,26 +32,30 @@ const drawerOpen = ref(false)
 const target = ref<ControlExecution | null>(null)
 const selectedPlan = ref<FeedingPlan | null>(null)
 const scheduledLocal = ref(toLocalInput(new Date(Date.now() + 3600000)))
-const form = reactive<ExecutionInput>({ pondId: 0, feedingPlanId: 0, scheduledAt: '', plannedAmountKg: 0, weather: '' })
+const form = reactive<ExecutionInput>({ pondId: 0, feedingPlanId: 0, recommendationId: 0, scheduledAt: '', plannedAmountKg: 0, weather: '' })
 const completion = reactive({ actualAmountKg: 0, oxygenSnapshot: 6, feedback: '' })
 
 const scheduledCount = computed(() => executions.value.filter((item) => item.status === 'scheduled').length)
 const runningCount = computed(() => executions.value.filter((item) => item.status === 'running').length)
 const completedAmount = computed(() => executions.value.filter((item) => item.status === 'completed').reduce((sum, item) => sum + item.actualAmountKg, 0))
 const availablePlans = computed(() => plans.value.filter((plan) => plan.status === 'approved' && (!form.pondId || plan.pondId === form.pondId)))
+const availableRecommendations = computed(() => recommendations.value.filter((item) => item.pondId === form.pondId && item.feedingPlanId === form.feedingPlanId))
+const selectedRecommendation = computed(() => recommendations.value.find((item) => item.id === form.recommendationId) || null)
 
 async function load() {
   loading.value = true
   try {
-    const [result, pondResult, planResult] = await Promise.all([
+    const [result, pondResult, planResult, recResult] = await Promise.all([
       executionApi.list({ page: Number(params.page), pageSize: 20, status: String(params.status), pondId: Number(params.pondId) || undefined }),
       pondApi.list({ page: 1, pageSize: 100 }),
       planApi.list({ page: 1, pageSize: 100 }),
+      recommendationApi.list({ page: 1, pageSize: 100, status: 'valid' }),
     ])
     executions.value = result.items
     total.value = result.total
     ponds.value = pondResult.items
     plans.value = planResult.items
+    recommendations.value = recResult.items
   } catch (error) {
     ElMessage.error(errorMessage(error))
   } finally {
@@ -60,8 +66,10 @@ async function load() {
 function openCreate() {
   const firstPlan = plans.value.find((item) => item.status === 'approved')
   Object.assign(form, {
-    pondId: firstPlan?.pondId || 0, feedingPlanId: firstPlan?.id || 0, plannedAmountKg: firstPlan ? firstPlan.dailyAmountKg / firstPlan.frequencyPerDay : 0, weather: '晴朗，微风',
+    pondId: firstPlan?.pondId || 0, feedingPlanId: firstPlan?.id || 0, recommendationId: 0, plannedAmountKg: 0, weather: '',
   })
+  const firstRec = recommendations.value.find((item) => item.pondId === form.pondId && item.feedingPlanId === form.feedingPlanId)
+  if (firstRec) applyRecommendation(firstRec.id)
   scheduledLocal.value = toLocalInput(new Date(Date.now() + 3600000))
   editorOpen.value = true
 }
@@ -70,12 +78,27 @@ function onPlanChange(planId: number) {
   const plan = plans.value.find((item) => item.id === planId)
   if (!plan) return
   form.pondId = plan.pondId
-  form.plannedAmountKg = Number((plan.dailyAmountKg / plan.frequencyPerDay).toFixed(2))
+  form.recommendationId = 0
+  const matched = recommendations.value.find((item) => item.pondId === plan.pondId && item.feedingPlanId === plan.id)
+  if (matched) applyRecommendation(matched.id)
+  else form.plannedAmountKg = Number((plan.dailyAmountKg / plan.frequencyPerDay).toFixed(2))
+}
+
+function applyRecommendation(recommendationId: number) {
+  const snapshot = recommendations.value.find((item) => item.id === recommendationId)
+  if (!snapshot) return
+  form.recommendationId = snapshot.id
+  form.plannedAmountKg = snapshot.amountPerFeedingKg
+  form.weather = snapshot.weather
 }
 
 async function create() {
   if (!form.pondId || !form.feedingPlanId || form.plannedAmountKg <= 0) {
     ElMessage.warning('请选择已批准计划并填写数量')
+    return
+  }
+  if (!form.recommendationId) {
+    ElMessage.warning('请选择一个有效的建议快照作为执行依据')
     return
   }
   saving.value = true
@@ -173,6 +196,7 @@ onMounted(load)
       </div>
       <el-table v-loading="loading" :data="executions" stripe empty-text="暂无执行记录">
         <el-table-column label="养殖池 / 计划" min-width="230"><template #default="{ row }"><div class="primary-cell"><strong>{{ row.pond?.name }}</strong><button class="inline-link" @click="showPlan(row)">{{ row.feedingPlan?.name }} · v{{ row.feedingPlan?.version }}</button></div></template></el-table-column>
+        <el-table-column label="建议 / 依据" min-width="200"><template #default="{ row }"><div v-if="row.recommendationCode" class="primary-cell"><strong>{{ row.recommendationCode }}</strong><small :title="row.basis">{{ row.basis }}</small></div><span v-else class="muted">—</span></template></el-table-column>
         <el-table-column label="安排时间" min-width="165"><template #default="{ row }">{{ formatDateTime(row.scheduledAt) }}</template></el-table-column>
         <el-table-column label="计划 / 实际" min-width="130"><template #default="{ row }">{{ row.plannedAmountKg }} / {{ row.actualAmountKg || '—' }} kg</template></el-table-column>
         <el-table-column label="天气" prop="weather" min-width="130" show-overflow-tooltip />
@@ -187,10 +211,20 @@ onMounted(load)
       <div class="pagination"><el-pagination v-model:current-page="params.page" layout="total, prev, pager, next" :total="total" :page-size="20" /></div>
     </section>
     <el-dialog v-model="editorOpen" title="安排投喂执行" width="620px">
-      <el-alert title="仅可选择已批准计划；保存时将检查 24 小时内水质" type="info" :closable="false" show-icon />
+      <el-alert title="必须从有效建议快照中选择执行依据；保存时将校验快照状态与 24 小时内水质" type="info" :closable="false" show-icon />
       <el-form label-position="top" class="form-grid form-with-alert">
-        <el-form-item label="养殖池"><el-select v-model="form.pondId" @change="form.feedingPlanId = 0"><el-option v-for="pond in ponds.filter((item) => item.status === 'active')" :key="pond.id" :label="pond.name" :value="pond.id" /></el-select></el-form-item>
+        <el-form-item label="养殖池"><el-select v-model="form.pondId" @change="form.feedingPlanId = 0; form.recommendationId = 0"><el-option v-for="pond in ponds.filter((item) => item.status === 'active')" :key="pond.id" :label="pond.name" :value="pond.id" /></el-select></el-form-item>
         <el-form-item label="已批准计划"><el-select v-model="form.feedingPlanId" @change="onPlanChange"><el-option v-for="plan in availablePlans" :key="plan.id" :label="`${plan.name} · v${plan.version}`" :value="plan.id" /></el-select></el-form-item>
+        <el-form-item label="建议快照（有效）" class="form-span">
+          <el-select v-model="form.recommendationId" placeholder="选择生成于当前计划的有效建议" @change="applyRecommendation">
+            <el-option v-for="rec in availableRecommendations" :key="rec.id" :label="`${rec.code} · ${rec.dailyAmountKg} kg/日 · 调整 ${rec.adjustmentPercent}%`" :value="rec.id" />
+          </el-select>
+          <el-alert v-if="form.feedingPlanId && availableRecommendations.length === 0" title="当前计划暂无有效建议快照，请先在「投喂计划」页生成建议" type="warning" :closable="false" show-icon class="rec-alert" />
+        </el-form-item>
+        <div v-if="selectedRecommendation" class="form-span recommendation-result" :data-action="selectedRecommendation.action">
+          <div class="recommendation-main"><span>{{ selectedRecommendation.code }} · {{ selectedRecommendation.action === 'hold' ? '暂停投喂' : selectedRecommendation.action === 'reduce' ? '减量投喂' : '按计划投喂' }}</span><strong>{{ selectedRecommendation.dailyAmountKg }} kg/日</strong><small>{{ selectedRecommendation.amountPerFeedingKg }} kg × {{ selectedRecommendation.frequencyPerDay }} 次</small></div>
+          <ul><li v-for="reason in selectedRecommendation.reasons" :key="reason">{{ reason }}</li></ul>
+        </div>
         <el-form-item label="执行时间"><el-date-picker v-model="scheduledLocal" type="datetime" value-format="YYYY-MM-DDTHH:mm" /></el-form-item>
         <el-form-item label="计划数量（kg）"><el-input-number v-model="form.plannedAmountKg" :min="0.1" :step="1" /></el-form-item>
         <el-form-item label="天气窗口" class="form-span"><el-input v-model="form.weather" placeholder="例：晴朗，微风" /></el-form-item>
